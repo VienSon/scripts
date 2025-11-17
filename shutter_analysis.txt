@@ -1,0 +1,16 @@
+PHÂN TÍCH SHUTTER / IMAGE COUNTER (tự động)
+============================================================
+
+Camera (dựa trên file đầu tiên): SONY ILCE-6400
+Serial (nếu có): 8fff0000be0c
+
+TÓM TẮT TỪNG FILE:
+------------------------------------------------------------
+idx | datetime            | shutter       | image          | file
+------------------------------------------------------------
+  1 | 2025-10-22 07:18:58 | 18643         | 1             | DSC09104.JPG
+
+
+NGHI NGỜ BẤT THƯỜNG:
+------------------------------------------------------------
+Không phát hiện bất thường rõ ràng theo các rule đơn giản.

@@ -5,6 +5,7 @@ from datetime import datetime
 
 OUTPUT_FILE = "shutter_analysis.txt"
 
+
 def parse_int(value):
     """Convert các giá trị string như '12,345' -> 12345, nếu fail thì trả None."""
     if value is None:
@@ -15,10 +16,11 @@ def parse_int(value):
     except Exception:
         return None
 
+
 def parse_datetime(item):
     """Ưu tiên DateTimeOriginal, sau đó CreateDate, ModifyDate."""
-    for key in ("DateTimeOriginal", "CreateDate", "ModifyDate"):
-        dt_str = item.get(key)
+    for key in ("DateTimeOriginal", "CreateDate", "ModifyDate", "Created"):
+        dt_str = get_value_by_tag(item, key)
         if not dt_str:
             continue
         # ExifTool format thường là '2024:10:15 12:34:56'
@@ -28,6 +30,7 @@ def parse_datetime(item):
             except Exception:
                 continue
     return None
+
 
 def find_first_key_contains(item, keywords):
     """
@@ -41,6 +44,19 @@ def find_first_key_contains(item, keywords):
                 return orig_k, item[orig_k]
     return None, None
 
+
+def get_value_by_tag(item, tag_name):
+    """
+    Tìm giá trị với key cụ thể, chấp nhận format 'EXIF:TagName'.
+    """
+    target = tag_name.lower()
+    for key, value in item.items():
+        lower_key = key.lower()
+        if lower_key == target or lower_key.endswith(f":{target}"):
+            return value
+    return None
+
+
 def main():
     # Lấy list file JPEG
     jpeg_files = [f for f in os.listdir(".") if f.lower().endswith((".jpg", ".jpeg"))]
@@ -52,9 +68,9 @@ def main():
     cmd = [
         "exiftool",
         "-json",
-        "-a",     # show all
-        "-G1",    # show group (MakerNotes, EXIF...)
-        "-s",     # short tag names
+        "-a",  # show all
+        "-G1",  # show group (MakerNotes, EXIF...)
+        "-s",  # short tag names
         "-FileName",
         "-DateTimeOriginal",
         "-CreateDate",
@@ -91,35 +107,37 @@ def main():
     records = []
 
     for item in data:
-        filename = item.get("FileName")
+        filename = get_value_by_tag(item, "FileName") or item.get("SourceFile")
         dt = parse_datetime(item)
 
         # Tìm các field liên quan
         # shutter-like: ShutterCount / ExposureCount / ReleaseCount / Sony_ExposureCount...
         shutter_key, shutter_val_raw = find_first_key_contains(
-            item,
-            ["shuttercount", "exposurecount", "releasecount"]
+            item, ["shuttercount", "exposurecount", "releasecount"]
         )
         image_key, image_val_raw = find_first_key_contains(
-            item,
-            ["imagenumber", "imagecount", "imagecounter", "filenumber"]
+            item, ["imagenumber", "imagecount", "imagecounter", "filenumber"]
         )
 
         shutter_val = parse_int(shutter_val_raw)
         image_val = parse_int(image_val_raw)
 
-        records.append({
-            "filename": filename,
-            "datetime": dt,
-            "datetime_str": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "N/A",
-            "shutter_key": shutter_key,
-            "shutter_val": shutter_val,
-            "image_key": image_key,
-            "image_val": image_val,
-            "make": item.get("Make"),
-            "model": item.get("Model"),
-            "serial": item.get("SerialNumber") or item.get("InternalSerialNumber") or item.get("BodySerialNumber"),
-        })
+        records.append(
+            {
+                "filename": filename,
+                "datetime": dt,
+                "datetime_str": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "N/A",
+                "shutter_key": shutter_key,
+                "shutter_val": shutter_val,
+                "image_key": image_key,
+                "image_val": image_val,
+                "make": get_value_by_tag(item, "Make"),
+                "model": get_value_by_tag(item, "Model"),
+                "serial": get_value_by_tag(item, "SerialNumber")
+                or get_value_by_tag(item, "InternalSerialNumber")
+                or get_value_by_tag(item, "BodySerialNumber"),
+            }
+        )
 
     # Sort theo thời gian chụp (ảnh không có thời gian đưa cuối danh sách)
     records.sort(key=lambda r: (r["datetime"] is None, r["datetime"] or datetime.max))
@@ -143,12 +161,16 @@ def main():
             # shutter count không nên giảm theo thời gian
             if previous["shutter_val"] is not None and rec["shutter_val"] is not None:
                 if rec["shutter_val"] + 1000 < previous["shutter_val"]:
-                    notes.append("ShutterCount bị giảm mạnh theo thời gian (reset/thay shutter?)")
+                    notes.append(
+                        "ShutterCount bị giảm mạnh theo thời gian (reset/thay shutter?)"
+                    )
 
             # image counter cũng không nên giảm nhiều
             if previous["image_val"] is not None and rec["image_val"] is not None:
                 if rec["image_val"] + 1000 < previous["image_val"]:
-                    notes.append("ImageNumber bị giảm mạnh theo thời gian (reset counter?)")
+                    notes.append(
+                        "ImageNumber bị giảm mạnh theo thời gian (reset counter?)"
+                    )
 
         if notes:
             suspicious.append((rec, notes))
@@ -185,13 +207,18 @@ def main():
             for rec, notes in suspicious:
                 f.write(f"FILE: {rec['filename']}\n")
                 f.write(f"  Thời gian   : {rec['datetime_str']}\n")
-                f.write(f"  Shutter     : {rec['shutter_val']} (key: {rec['shutter_key']})\n")
-                f.write(f"  Image count : {rec['image_val']} (key: {rec['image_key']})\n")
+                f.write(
+                    f"  Shutter     : {rec['shutter_val']} (key: {rec['shutter_key']})\n"
+                )
+                f.write(
+                    f"  Image count : {rec['image_val']} (key: {rec['image_key']})\n"
+                )
                 for n in notes:
                     f.write(f"  -> {n}\n")
                 f.write("\n")
 
     print(f"Đã phân tích xong. Kết quả lưu tại: {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
     main()
