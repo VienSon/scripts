@@ -1,223 +1,171 @@
+#!/usr/bin/env python3
+"""
+Universal Photo EXIF Reader + Z6 Detector + Sony Serial Extractor
+---------------------------------------------------------------
+
+✔ Reads all photos in current folder
+✔ Extracts shutter count for all brands
+✔ Extracts serial number for SONY, NIKON, CANON, FUJI, PANASONIC
+✔ Scans Sony MakerNotes to find hidden serial values
+✔ Detects if image is Z6 or not
+"""
+
 import subprocess
-import os
 import json
-from datetime import datetime
-
-OUTPUT_FILE = "shutter_analysis.txt"
+from pathlib import Path
 
 
-def parse_int(value):
-    """Convert các giá trị string như '12,345' -> 12345, nếu fail thì trả None."""
-    if value is None:
+def run_exiftool(path):
+    """Run ExifTool and return JSON data."""
+    result = subprocess.run(
+        ["exiftool", "-json", str(path)], capture_output=True, text=True
+    )
+    if result.returncode != 0:
         return None
     try:
-        s = str(value).split()[0].replace(",", "")
-        return int(s)
-    except Exception:
+        return json.loads(result.stdout)[0]
+    except:
         return None
 
 
-def parse_datetime(item):
-    """Ưu tiên DateTimeOriginal, sau đó CreateDate, ModifyDate."""
-    for key in ("DateTimeOriginal", "CreateDate", "ModifyDate", "Created"):
-        dt_str = get_value_by_tag(item, key)
-        if not dt_str:
-            continue
-        # ExifTool format thường là '2024:10:15 12:34:56'
-        for fmt in ("%Y:%m:%d %H:%M:%S", "%Y:%m:%d %H:%M:%S%z"):
+def extract_sony_serial(data):
+    """Try multiple MakerNote tags where Sony hides serial."""
+    sony_keys = [
+        "SerialNumber",
+        "InternalSerialNumber",
+        "CameraSerialNumber",
+        "BodySerialNumber",
+        "SerialNumber2",
+        # Sony MakerNote fields commonly containing serial-like data:
+        "Sony_0x0018",
+        "Sony_0xB000",
+        "Sony_0xB001",
+        "SonyModelID",
+        "FirmwareVersion2",
+    ]
+
+    for key in sony_keys:
+        if key in data:
+            val = str(data[key]).strip()
+            # Sony often encodes serial with prefix like "0x123456"
+            if val and val != "None" and len(val) >= 5:
+                # Remove hex prefix
+                if val.startswith("0x"):
+                    try:
+                        return str(int(val, 16))
+                    except:
+                        return val
+                return val
+
+    # Fallback: scan all Keys for "serial"
+    for key, val in data.items():
+        if "serial" in key.lower():
+            return str(val)
+
+    return None
+
+
+def get_serial_number(data):
+    """Extract serial number for any brand."""
+    make = str(data.get("Make", "")).upper()
+
+    # Sony special handling
+    if "SONY" in make:
+        s = extract_sony_serial(data)
+        return s or "N/A"
+
+    # Standard fields for Nikon/Canon/Fuji/Panasonic
+    for key in [
+        "SerialNumber",
+        "CameraSerialNumber",
+        "InternalSerialNumber",
+        "BodySerialNumber",
+    ]:
+        if key in data:
+            return str(data[key])
+
+    # Fallback generic search
+    for key, val in data.items():
+        if "serial" in key.lower():
+            return str(val)
+
+    return "N/A"
+
+
+def get_shutter_count(data):
+    """Extract shutter count for any brand."""
+    keys = [
+        "ShutterCount",
+        "ImageCount",
+        "ImageNumber",
+        "TotalShot",
+        "ActuationCount",
+        "ShutterActuations",
+        "TotalPhotos",
+    ]
+
+    for k in keys:
+        if k in data:
             try:
-                return datetime.strptime(dt_str, fmt)
-            except Exception:
-                continue
+                return int(data[k])
+            except:
+                pass
     return None
 
 
-def find_first_key_contains(item, keywords):
-    """
-    Tìm key đầu tiên trong item có chứa 1 trong các keyword (không phân biệt hoa thường).
-    Trả về (key, value) hoặc (None, None).
-    """
-    lower_map = {k.lower(): k for k in item.keys()}
-    for lk, orig_k in lower_map.items():
-        for kw in keywords:
-            if kw in lk:
-                return orig_k, item[orig_k]
-    return None, None
+def print_info(data, filename):
+    print("----------------------------------------------------")
+    print(f"FILE: {filename}")
 
+    make = data.get("Make", "Unknown")
+    model = data.get("Model", "Unknown")
+    serial = get_serial_number(data)
+    shutter = get_shutter_count(data)
 
-def get_value_by_tag(item, tag_name):
-    """
-    Tìm giá trị với key cụ thể, chấp nhận format 'EXIF:TagName'.
-    """
-    target = tag_name.lower()
-    for key, value in item.items():
-        lower_key = key.lower()
-        if lower_key == target or lower_key.endswith(f":{target}"):
-            return value
-    return None
+    dt = data.get("DateTimeOriginal", data.get("CreateDate", "Unknown"))
+    lens = data.get("LensModel", data.get("Lens", "Unknown"))
+    iso = data.get("ISO", "Unknown")
+    aperture = data.get("Aperture", data.get("FNumber", "Unknown"))
+    speed = data.get("ShutterSpeed", data.get("ExposureTime", "Unknown"))
+    width = data.get("ImageWidth", "?")
+    height = data.get("ImageHeight", "?")
+
+    # Print
+    print(f"- Camera      : {make} {model}")
+    print(f"- Serial      : {serial}")
+    print(f"- Date        : {dt}")
+    print(f"- Lens        : {lens}")
+    print(f"- ISO         : {iso}")
+    print(f"- Aperture    : {aperture}")
+    print(f"- Shutter     : {speed}")
+    print(f"- Resolution  : {width} x {height}")
+    print(f"- ShutterCount: {shutter}")
+
+    # Z6 detection
+    if "NIKON Z 6" in str(model).upper():
+        print(">>> This photo IS from a Nikon Z6 ✓")
+    else:
+        print(">>> This photo is NOT from a Nikon Z6 ✗")
 
 
 def main():
-    # Lấy list file JPEG
-    jpeg_files = [f for f in os.listdir(".") if f.lower().endswith((".jpg", ".jpeg"))]
-    if not jpeg_files:
-        print("Không tìm thấy file JPEG nào trong folder hiện tại.")
+    print("=== UNIVERSAL PHOTO EXIF ANALYZER + SONY SERIAL SUPPORT ===")
+
+    exts = ["*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.nef", "*.NEF", "*.ARW", "*.arw"]
+    files = []
+    for ext in exts:
+        files.extend(Path(".").glob(ext))
+
+    if not files:
+        print("No image files found in folder.")
         return
 
-    # Gọi exiftool với output JSON
-    cmd = [
-        "exiftool",
-        "-json",
-        "-a",  # show all
-        "-G1",  # show group (MakerNotes, EXIF...)
-        "-s",  # short tag names
-        "-FileName",
-        "-DateTimeOriginal",
-        "-CreateDate",
-        "-ModifyDate",
-        "-Make",
-        "-Model",
-        "-FirmwareVersion",
-        "-*ShutterCount*",
-        "-*ExposureCount*",
-        "-*ReleaseCount*",
-        "-*ImageNumber*",
-        "-*ImageCount*",
-        "-*ImageCounter*",
-        "-*FileNumber*",
-        "-*Serial*",
-    ] + jpeg_files
+    print(f"Found {len(files)} image files.\n")
 
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.stderr.strip():
-        print("ExifTool stderr:\n", result.stderr)
-
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        print("Lỗi đọc JSON từ exiftool:", e)
-        return
-
-    records = []
-
-    for item in data:
-        filename = get_value_by_tag(item, "FileName") or item.get("SourceFile")
-        dt = parse_datetime(item)
-
-        # Tìm các field liên quan
-        # shutter-like: ShutterCount / ExposureCount / ReleaseCount / Sony_ExposureCount...
-        shutter_key, shutter_val_raw = find_first_key_contains(
-            item, ["shuttercount", "exposurecount", "releasecount"]
-        )
-        image_key, image_val_raw = find_first_key_contains(
-            item, ["imagenumber", "imagecount", "imagecounter", "filenumber"]
-        )
-
-        shutter_val = parse_int(shutter_val_raw)
-        image_val = parse_int(image_val_raw)
-
-        records.append(
-            {
-                "filename": filename,
-                "datetime": dt,
-                "datetime_str": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "N/A",
-                "shutter_key": shutter_key,
-                "shutter_val": shutter_val,
-                "image_key": image_key,
-                "image_val": image_val,
-                "make": get_value_by_tag(item, "Make"),
-                "model": get_value_by_tag(item, "Model"),
-                "serial": get_value_by_tag(item, "SerialNumber")
-                or get_value_by_tag(item, "InternalSerialNumber")
-                or get_value_by_tag(item, "BodySerialNumber"),
-            }
-        )
-
-    # Sort theo thời gian chụp (ảnh không có thời gian đưa cuối danh sách)
-    records.sort(key=lambda r: (r["datetime"] is None, r["datetime"] or datetime.max))
-
-    # Phân tích nghi ngờ
-    suspicious = []
-    previous = None
-
-    for rec in records:
-        notes = []
-
-        # 1. Quan hệ image_val vs shutter_val
-        sv = rec["shutter_val"]
-        iv = rec["image_val"]
-        if sv is not None and iv is not None:
-            if iv > sv * 1.5 + 1000:
-                notes.append("ImageNumber lớn bất thường so với ShutterCount")
-
-        # 2. Nhảy lùi theo thời gian
-        if previous:
-            # shutter count không nên giảm theo thời gian
-            if previous["shutter_val"] is not None and rec["shutter_val"] is not None:
-                if rec["shutter_val"] + 1000 < previous["shutter_val"]:
-                    notes.append(
-                        "ShutterCount bị giảm mạnh theo thời gian (reset/thay shutter?)"
-                    )
-
-            # image counter cũng không nên giảm nhiều
-            if previous["image_val"] is not None and rec["image_val"] is not None:
-                if rec["image_val"] + 1000 < previous["image_val"]:
-                    notes.append(
-                        "ImageNumber bị giảm mạnh theo thời gian (reset counter?)"
-                    )
-
-        if notes:
-            suspicious.append((rec, notes))
-
-        previous = rec
-
-    # Ghi file report
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write("PHÂN TÍCH SHUTTER / IMAGE COUNTER (tự động)\n")
-        f.write("============================================================\n\n")
-        if records:
-            cam = records[0]
-            f.write(f"Camera (dựa trên file đầu tiên): {cam['make']} {cam['model']}\n")
-            f.write(f"Serial (nếu có): {cam['serial']}\n\n")
-
-        f.write("TÓM TẮT TỪNG FILE:\n")
-        f.write("------------------------------------------------------------\n")
-        f.write("idx | datetime            | shutter       | image          | file\n")
-        f.write("------------------------------------------------------------\n")
-
-        for idx, rec in enumerate(records, start=1):
-            f.write(
-                f"{idx:3d} | {rec['datetime_str']:19} | "
-                f"{(str(rec['shutter_val']) if rec['shutter_val'] is not None else '-'):13} | "
-                f"{(str(rec['image_val']) if rec['image_val'] is not None else '-'):13} | "
-                f"{rec['filename']}\n"
-            )
-
-        f.write("\n\nNGHI NGỜ BẤT THƯỜNG:\n")
-        f.write("------------------------------------------------------------\n")
-        if not suspicious:
-            f.write("Không phát hiện bất thường rõ ràng theo các rule đơn giản.\n")
-        else:
-            for rec, notes in suspicious:
-                f.write(f"FILE: {rec['filename']}\n")
-                f.write(f"  Thời gian   : {rec['datetime_str']}\n")
-                f.write(
-                    f"  Shutter     : {rec['shutter_val']} (key: {rec['shutter_key']})\n"
-                )
-                f.write(
-                    f"  Image count : {rec['image_val']} (key: {rec['image_key']})\n"
-                )
-                for n in notes:
-                    f.write(f"  -> {n}\n")
-                f.write("\n")
-
-    print(f"Đã phân tích xong. Kết quả lưu tại: {OUTPUT_FILE}")
+    for f in sorted(files):
+        data = run_exiftool(f)
+        if data:
+            print_info(data, f.name)
 
 
 if __name__ == "__main__":
